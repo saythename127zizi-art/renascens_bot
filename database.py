@@ -4,7 +4,7 @@ from __future__ import annotations
 import csv
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -213,6 +213,47 @@ def delete_transaction(user_id: int, transaction_id: int) -> bool:
         )
         return cur.rowcount > 0
 
+
+
+def get_transaction(user_id: int, transaction_id: int) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM transactions WHERE user_id=? AND id=?",
+            (user_id, transaction_id),
+        ).fetchone()
+
+
+def update_transaction(user_id: int, transaction_id: int, nominal: int, kategori: str, catatan: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE transactions SET nominal=?, kategori=?, catatan=? WHERE user_id=? AND id=?",
+            (nominal, normalize_category(kategori), catatan.strip(), user_id, transaction_id),
+        )
+        if cur.rowcount == 0:
+            return None
+    return get_transaction(user_id, transaction_id)
+
+
+def activity_streak(user_id: int) -> int:
+    """Hitung streak hari berturut-turut yang punya transaksi, mundur dari hari ini."""
+    today = date.today()
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT substr(created_at, 1, 10) AS tanggal
+            FROM transactions
+            WHERE user_id=?
+            ORDER BY tanggal DESC
+            """,
+            (user_id,),
+        ).fetchall()
+    dates = {date.fromisoformat(r["tanggal"]) for r in rows if r["tanggal"]}
+    streak = 0
+    cur = today
+    while cur in dates:
+        streak += 1
+        cur = cur.replace() - timedelta(days=1)
+    return streak
 
 def update_last_transaction(user_id: int, nominal: int, kategori: str, catatan: str) -> sqlite3.Row | None:
     last = get_last_transaction(user_id)

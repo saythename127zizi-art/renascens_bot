@@ -15,19 +15,22 @@ from utils import JAKARTA_TZ
 
 async def post_init(application) -> None:
     commands = [
-        BotCommand("start", "Mulai bot"),
-        BotCommand("keluar", "Catat pengeluaran"),
-        BotCommand("masuk", "Catat pemasukan"),
-        BotCommand("hariini", "Laporan hari ini"),
-        BotCommand("bulanini", "Laporan bulan ini"),
-        BotCommand("stat", "Statistik sederhana"),
-        BotCommand("riwayat", "Lihat transaksi terakhir"),
-        BotCommand("export_csv", "Export transaksi CSV"),
-        BotCommand("produk", "Tambah produk jualan"),
-        BotCommand("jual", "Catat penjualan"),
-        BotCommand("stok", "Lihat stok jualan"),
-        BotCommand("laba_bulanini", "Laporan laba bulan ini"),
-        BotCommand("help", "Bantuan"),
+        BotCommand("start", "Open main menu"),
+        BotCommand("out", "Add expense: /out 12000 makan seblak"),
+        BotCommand("in", "Add income: /in 45000 jualan mie"),
+        BotCommand("today", "Today summary"),
+        BotCommand("detail", "Detailed daily report"),
+        BotCommand("month", "Monthly summary"),
+        BotCommand("history", "Recent transactions"),
+        BotCommand("stats", "Spending stats"),
+        BotCommand("edit", "Edit by ID"),
+        BotCommand("del", "Delete by ID"),
+        BotCommand("view", "View transaction detail"),
+        BotCommand("product", "Add product"),
+        BotCommand("sell", "Record sale"),
+        BotCommand("stock", "View stock"),
+        BotCommand("profit", "Monthly profit"),
+        BotCommand("help", "Help"),
     ]
     await application.bot.set_my_commands(commands)
 

@@ -23,6 +23,8 @@ from utils import (
     format_sale,
     format_sales_summary,
     format_summary,
+    format_summary_detail,
+    format_success,
     format_transaction,
     format_product,
     help_text,
@@ -72,10 +74,18 @@ async def add_transaction_command(update: Update, context: ContextTypes.DEFAULT_
         if not db.category_exists(user_id, tipe, kategori):
             db.add_category(user_id, tipe, kategori)
         transaction_id = db.add_transaction(user_id, tipe, nominal, kategori, catatan)
-        icon = "➕" if tipe == "masuk" else "➖"
+        row = db.get_transaction(user_id, transaction_id)
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✏️ Cara edit", callback_data=f"edit_hint:{transaction_id}"),
+                InlineKeyboardButton("🗑️ Hapus", callback_data=f"delete_yes:{transaction_id}"),
+            ],
+            [InlineKeyboardButton("📘 Lihat hari ini", callback_data="report_today")],
+        ])
         await update.message.reply_text(
-            f"{icon} Berhasil dicatat!\n#{transaction_id} • {kategori} • {rupiah(nominal)}\n{catatan or '-'}",
-            reply_markup=menu_keyboard(),
+            format_success(row, db.activity_streak(user_id)),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard,
         )
     except ValueError as exc:
         command = "/masuk" if tipe == "masuk" else "/keluar"
@@ -123,9 +133,20 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str,
     await update.message.reply_text(format_summary(title, summary), parse_mode=ParseMode.MARKDOWN)
 
 
+async def report_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, start: date, end: date) -> None:
+    user_id = ensure_user_from_update(update)
+    summary = db.summarize_range(user_id, start, end)
+    await update.message.reply_text(format_summary_detail(title, summary), parse_mode=ParseMode.MARKDOWN)
+
+
 async def hariini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     start, end = range_today()
     await report(update, context, f"Laporan Hari Ini ({start.isoformat()})", start, end)
+
+
+async def detail_hariini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    start, end = range_today()
+    await report_detail(update, context, f"Hari Ini ({start.isoformat()})", start, end)
 
 
 async def mingguini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -214,6 +235,23 @@ async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query.data == "delete_no":
         await query.edit_message_text("Oke, batal dihapus.")
         return
+    if query.data == "report_today":
+        start, end = range_today()
+        summary = db.summarize_range(user_id, start, end)
+        await query.message.reply_text(format_summary(f"Laporan Hari Ini ({start.isoformat()})", summary), parse_mode=ParseMode.MARKDOWN)
+        return
+    if query.data.startswith("edit_hint:"):
+        transaction_id = int(query.data.split(":", 1)[1])
+        row = db.get_transaction(user_id, transaction_id)
+        if not row:
+            await query.message.reply_text("Transaksi tidak ditemukan.")
+            return
+        await query.message.reply_text(
+            "✏️ Copy format ini lalu ubah angkanya:\n"
+            f"`/edit {row['id']} {row['nominal']} {row['kategori']} {row['catatan'] or ''}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
     transaction_id = int(query.data.split(":", 1)[1])
     deleted = db.delete_transaction(user_id, transaction_id)
     await query.edit_message_text("✅ Transaksi berhasil dihapus." if deleted else "Transaksi tidak ditemukan.")
@@ -230,6 +268,59 @@ async def edit_terakhir(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("✅ Transaksi terakhir sudah diedit:\n" + format_transaction(row))
     except ValueError as exc:
         await update.message.reply_text(f"Format: `/edit_terakhir 12000 makan seblak`\n\n{exc}", parse_mode=ParseMode.MARKDOWN)
+
+
+async def detail_transaksi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = ensure_user_from_update(update)
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("Format: `/detail 13`", parse_mode=ParseMode.MARKDOWN)
+        return
+    row = db.get_transaction(user_id, int(context.args[0]))
+    if not row:
+        await update.message.reply_text("Transaksi dengan ID itu nggak ketemu.")
+        return
+    await update.message.reply_text(format_transaction(row), parse_mode=ParseMode.MARKDOWN)
+
+
+async def edit_transaksi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = ensure_user_from_update(update)
+    if len(context.args) < 3 or not context.args[0].isdigit():
+        await update.message.reply_text(
+            "Format: `/edit ID nominal kategori catatan`\nContoh: `/edit 13 5105 lzd x spay deals`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    try:
+        transaction_id = int(context.args[0])
+        nominal, kategori, catatan = parse_transaction_args(context.args[1:])
+        if not db.category_exists(user_id, "masuk", kategori) and not db.category_exists(user_id, "keluar", kategori):
+            # Kita tidak tahu tipe transaksi dari argumen, jadi nanti pakai tipe lama dari row.
+            old = db.get_transaction(user_id, transaction_id)
+            if old:
+                db.add_category(user_id, old["tipe"], kategori)
+        row = db.update_transaction(user_id, transaction_id, nominal, kategori, catatan)
+        if not row:
+            await update.message.reply_text("Transaksi dengan ID itu nggak ketemu.")
+            return
+        await update.message.reply_text("✅ *Transaksi berhasil diedit:*\n\n" + format_transaction(row), parse_mode=ParseMode.MARKDOWN)
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+
+
+async def hapus_transaksi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = ensure_user_from_update(update)
+    if len(context.args) != 1 or not context.args[0].isdigit():
+        await update.message.reply_text("Format: `/hapus 13`", parse_mode=ParseMode.MARKDOWN)
+        return
+    transaction_id = int(context.args[0])
+    row = db.get_transaction(user_id, transaction_id)
+    if not row:
+        await update.message.reply_text("Transaksi dengan ID itu nggak ketemu.")
+        return
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Ya, hapus", callback_data=f"delete_yes:{transaction_id}"), InlineKeyboardButton("Batal", callback_data="delete_no")]
+    ])
+    await update.message.reply_text("Yakin mau hapus transaksi ini?\n\n" + format_transaction(row), parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
 
 async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -427,8 +518,13 @@ async def interactive_note(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not db.category_exists(user_id, tipe, kategori):
         db.add_category(user_id, tipe, kategori)
     transaction_id = db.add_transaction(user_id, tipe, nominal, kategori, catatan)
-    icon = "➕" if tipe == "masuk" else "➖"
-    await update.message.reply_text(f"{icon} Berhasil dicatat #{transaction_id}: {kategori} — {rupiah(nominal)}", reply_markup=menu_keyboard())
+    row = db.get_transaction(user_id, transaction_id)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Cara edit", callback_data=f"edit_hint:{transaction_id}"), InlineKeyboardButton("🗑️ Hapus", callback_data=f"delete_yes:{transaction_id}")],
+        [InlineKeyboardButton("📘 Lihat hari ini", callback_data="report_today")],
+    ])
+    await update.message.reply_text(format_success(row, db.activity_streak(user_id)), parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+    await update.message.reply_text("Menu utama:", reply_markup=menu_keyboard())
     return ConversationHandler.END
 
 
@@ -632,6 +728,7 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text
     mapping = {
         "📅 Hari Ini": hariini,
+        "🔎 Detail Hari Ini": detail_hariini,
         "📆 Bulan Ini": bulanini,
         "📊 Statistik": stat,
         "🧾 Riwayat": riwayat,
@@ -675,36 +772,40 @@ def get_handlers():
     return [
         CommandHandler("start", start),
         CommandHandler("help", help_command),
-        CommandHandler("keluar", keluar),
-        CommandHandler("masuk", masuk),
-        CommandHandler("kategori_tambah", kategori_tambah),
-        CommandHandler("kategori", kategori),
-        CommandHandler("hariini", hariini),
-        CommandHandler("mingguini", mingguini),
-        CommandHandler("bulanini", bulanini),
-        CommandHandler("tahunini", tahunini),
-        CommandHandler("range", range_report),
-        CommandHandler("budget", budget),
-        CommandHandler("reminder", reminder),
-        CommandHandler("reminder_off", reminder_off),
-        CommandHandler("hapus_terakhir", hapus_terakhir),
-        CommandHandler("edit_terakhir", edit_terakhir),
-        CommandHandler("riwayat", riwayat),
-        CommandHandler("export_csv", export_csv),
-        CommandHandler("stat", stat),
-        CommandHandler("utang", utang),
-        CommandHandler("piutang", piutang),
-        CommandHandler("daftar_utang", daftar_utang),
-        CommandHandler("lunas", lunas),
-        CommandHandler("tabungan", tabungan),
-        CommandHandler("nabung", nabung),
-        CommandHandler("produk", produk),
-        CommandHandler("stok", stok),
-        CommandHandler("tambah_stok", tambah_stok),
-        CommandHandler("jual", jual),
-        CommandHandler("laba_hariini", laba_hariini),
-        CommandHandler("laba_bulanini", laba_bulanini),
-        CallbackQueryHandler(delete_callback, pattern="^delete_"),
+        CommandHandler(["keluar", "k", "out", "expense"], keluar),
+        CommandHandler(["masuk", "m", "in", "income"], masuk),
+        CommandHandler(["kategori_tambah", "ktb", "add_category"], kategori_tambah),
+        CommandHandler(["kategori", "kt", "category", "categories"], kategori),
+        CommandHandler(["hariini", "h", "today"], hariini),
+        CommandHandler(["detail_hariini", "dh", "detail_today", "daily"], detail_hariini),
+        CommandHandler(["mingguini", "mg", "week"], mingguini),
+        CommandHandler(["bulanini", "b", "month"], bulanini),
+        CommandHandler(["tahunini", "t", "year"], tahunini),
+        CommandHandler(["range", "rg", "period"], range_report),
+        CommandHandler(["budget", "bd"], budget),
+        CommandHandler(["reminder", "rm"], reminder),
+        CommandHandler(["reminder_off", "rmo"], reminder_off),
+        CommandHandler(["hapus_terakhir", "ht"], hapus_terakhir),
+        CommandHandler(["edit_terakhir", "et"], edit_terakhir),
+        CommandHandler(["detail", "d", "view"], detail_transaksi),
+        CommandHandler(["edit", "e"], edit_transaksi),
+        CommandHandler(["hapus", "x", "del", "delete"], hapus_transaksi),
+        CommandHandler(["riwayat", "r", "history"], riwayat),
+        CommandHandler(["export_csv", "csv", "export"], export_csv),
+        CommandHandler(["stat", "s", "stats"], stat),
+        CommandHandler(["utang", "u", "debt"], utang),
+        CommandHandler(["piutang", "pu", "receivable"], piutang),
+        CommandHandler(["daftar_utang", "du", "debts"], daftar_utang),
+        CommandHandler(["lunas", "ln"], lunas),
+        CommandHandler(["tabungan", "tb", "saving"], tabungan),
+        CommandHandler(["nabung", "nb", "save"], nabung),
+        CommandHandler(["produk", "p", "product"], produk),
+        CommandHandler(["stok", "st", "stock"], stok),
+        CommandHandler(["tambah_stok", "ts", "restock"], tambah_stok),
+        CommandHandler(["jual", "j", "sell"], jual),
+        CommandHandler(["laba_hariini", "lh", "profit_today"], laba_hariini),
+        CommandHandler(["laba_bulanini", "lb", "profit"], laba_bulanini),
+        CallbackQueryHandler(delete_callback, pattern="^(delete_|edit_hint:|report_today)"),
         conv,
         sale_conv,
         MessageHandler(filters.TEXT & ~filters.COMMAND, menu_text),

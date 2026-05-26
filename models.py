@@ -29,10 +29,11 @@ INCOME_CATEGORIES = [
 
 MAIN_MENU = [
     ["➖ Catat Pengeluaran", "➕ Catat Pemasukan"],
-    ["📅 Hari Ini", "📆 Bulan Ini"],
-    ["📊 Statistik", "🧾 Riwayat"],
+    ["📅 Hari Ini", "🔎 Detail Hari Ini"],
+    ["📆 Bulan Ini", "📊 Statistik"],
+    ["🧾 Riwayat", "🏷️ Kategori"],
     ["🛒 Mode Jualan", "💰 Laba Bulan Ini"],
-    ["🏷️ Kategori", "💾 Export CSV"],
+    ["💾 Export CSV"],
 ]
 
 @dataclass(frozen=True)

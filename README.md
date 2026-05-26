@@ -4,11 +4,11 @@ Bot Telegram untuk mencatat pemasukan, pengeluaran, budget, utang/piutang, tabun
 
 ## Fitur
 
-- `/start` dengan tombol menu
+- `/stockatstart` dengan tombol menu
 - `/keluar nominal kategori catatan`
 - `/masuk nominal kategori catatan`
 - kategori default + custom
-- laporan `/hariini`, `/mingguini`, `/bulanini`, `/tahunini`, `/range`
+- laporan `/todayariini`, `/mingguini`, `/monthulanini`, `/tahunini`, `/historyange`
 - budget bulanan per kategori
 - reminder harian
 - hapus transaksi terakhir dengan konfirmasi
@@ -65,7 +65,7 @@ Windows:
 macOS/Linux:
 
 ```bash
-source .venv/bin/activate
+source .venv/monthin/activate
 ```
 
 Install dependency:
@@ -92,7 +92,7 @@ Jalankan bot:
 python main.py
 ```
 
-Buka Telegram, cari bot kamu, lalu kirim `/start`.
+Buka Telegram, cari bot kamu, lalu kirim `/stockatstart`.
 
 ## 3. Cara deploy ke Railway
 
@@ -109,32 +109,32 @@ worker: python main.py
 ```
 
 7. Deploy.
-8. Buka Telegram dan coba `/start`.
+8. Buka Telegram dan coba `/stockatstart`.
 
 Catatan: file SQLite `finance.db` tersimpan di storage app. Untuk production serius, lebih aman pakai volume/persistent storage atau pindah ke PostgreSQL.
 
 ## 4. Command testing
 
 ```text
-/start
+/stockatstart
 /keluar 12000 makan seblak
 /keluar 8000 transport ojek
 /masuk 45000 jualan mie
 /kategori
 /kategori_tambah keluar skincare
-/budget makan 500000
-/hariini
+/monthudget makan 500000
+/todayariini
 /mingguini
-/bulanini
+/monthulanini
 /tahunini
-/range 2026-05-01 2026-05-26
-/riwayat
-/riwayat 20
-/stat
+/historyange 2026-05-01 2026-05-26
+/historyiwayat
+/historyiwayat 20
+/stockatstat
 /export_csv
-/reminder 21:00
-/reminder_off
-/hapus_terakhir
+/historyeminder 21:00
+/historyeminder_off
+/todayapus_terakhir
 /edit_terakhir 15000 makan bakso
 /utang Rani 50000 pinjam makan
 /piutang Dini 30000 titip beli
@@ -233,7 +233,7 @@ Bot akan otomatis:
 ### Lihat stok
 
 ```bash
-/stok
+/stockatstok
 ```
 
 ### Tambah stok
@@ -257,3 +257,41 @@ Laporan laba menampilkan:
 - laba bersih
 - breakdown per barang
 - transaksi jualan terakhir
+
+## Update v3 - Tampilan lebih rapi
+
+Fitur tambahan:
+
+- `/todayariini` sekarang tampil sebagai ringkasan pendek yang lebih clean.
+- `/detail_hariini` untuk breakdown lengkap per kategori dan semua transaksi hari ini.
+- ID transaksi sekarang ditulis jelas sebagai `ID #...`.
+- Bisa edit transaksi lama berdasarkan ID:
+  - `/edit 13 5105 lzd x spay deals`
+- Bisa hapus transaksi berdasarkan ID:
+  - `/todayapus 13`
+- Bisa lihat detail satu transaksi:
+  - `/detail 13`
+- Setelah mencatat transaksi, bot menampilkan kartu transaksi yang lebih rapi, tombol edit/todayapus, dan streak catat harian biar lebih semangat.
+
+
+## Command Pendek v4
+
+Command panjang lama tetap bisa, tapi sekarang ada shortcut biar nggak capek ngetik:
+
+| Pendek | Sama dengan | Contoh |
+|---|---|---|
+| `/k` | `/keluar` | `/out 12000 makan seblak` |
+| `/m` | `/masuk` | `/in 45000 jualan mie` |
+| `/today` | `/todayariini` | `/today` |
+| `/dh` | `/detail_hariini` | `/dh` |
+| `/month` | `/monthulanini` | `/month` |
+| `/history` | `/historyiwayat` | `/history 10` |
+| `/stockats` | `/stockatstat` | `/stockats` |
+| `/e` | `/edit` | `/e 13 12000 makan seblak` |
+| `/x` | `/todayapus` | `/del 13` |
+| `/d` | `/detail` | `/view 13` |
+| `/p` | `/produk` | `/p indomie soto \| 2200 \| 4000 \| 10` |
+| `/j` | `/jual` | `/sell 1 2 pembeli tetangga` |
+| `/stockatst` | `/stockatstok` | `/stockatst` |
+| `/lh` | `/laba_hariini` | `/lh` |
+| `/profit` | `/laba_bulanini` | `/profit` |
