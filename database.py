@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
@@ -10,7 +11,29 @@ from typing import Any, Iterable
 
 from models import EXPENSE_CATEGORIES, INCOME_CATEGORIES
 
-DB_PATH = Path("finance.db")
+
+def _resolve_db_path() -> Path:
+    """Pilih lokasi database.
+
+    - Di Railway + Volume yang di-mount ke /data, pakai /data/finance.db supaya data tidak hilang saat redeploy.
+    - Bisa dioverride dengan environment variable DB_PATH.
+    - Kalau jalan lokal biasa, fallback ke finance.db di folder project.
+    """
+    custom_path = os.getenv("DB_PATH")
+    if custom_path:
+        path = Path(custom_path)
+    else:
+        data_dir = Path("/data")
+        if data_dir.exists() and os.access(data_dir, os.W_OK):
+            path = data_dir / "finance.db"
+        else:
+            path = Path("finance.db")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+DB_PATH = _resolve_db_path()
 
 @contextmanager
 def get_conn():

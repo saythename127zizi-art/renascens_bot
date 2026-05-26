@@ -295,3 +295,36 @@ Command panjang lama tetap bisa, tapi sekarang ada shortcut biar nggak capek nge
 | `/stockatst` | `/stockatstok` | `/stockatst` |
 | `/lh` | `/laba_hariini` | `/lh` |
 | `/profit` | `/laba_bulanini` | `/profit` |
+
+
+## Supaya Data Tidak Hilang Saat Update di Railway
+
+Bot ini menyimpan data di SQLite. Kalau Railway service kamu memakai Volume yang di-mount ke `/data`, database otomatis disimpan ke:
+
+```text
+/data/finance.db
+```
+
+Jadi data tetap aman walaupun bot di-redeploy/update.
+
+Cara setting Railway Volume:
+
+1. Buka project Railway.
+2. Masuk ke service bot kamu.
+3. Cari menu **Volumes** / **Storage**.
+4. Buat volume baru.
+5. Isi mount path:
+
+```text
+/data
+```
+
+6. Redeploy service.
+
+Opsional: kalau mau menentukan lokasi database sendiri, tambahkan variable:
+
+```env
+DB_PATH=/data/finance.db
+```
+
+Kalau tidak pakai Volume, bot tetap jalan, tapi file `finance.db` bisa hilang saat Railway membuat container baru.
