@@ -6,6 +6,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -220,8 +221,12 @@ def _next_display_id(conn: sqlite3.Connection, user_id: int) -> int:
     return int(row["next_id"] or 1)
 
 
+JAKARTA_TZ = ZoneInfo("Asia/Jakarta")
+
+
 def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    """Waktu lokal Indonesia (WIB) supaya laporan /today cocok dengan tanggal Telegram user."""
+    return datetime.now(JAKARTA_TZ).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
 def ensure_user(user_id: int, first_name: str | None = None) -> None:
@@ -348,7 +353,7 @@ def update_transaction(user_id: int, transaction_id: int, nominal: int, kategori
 
 def activity_streak(user_id: int) -> int:
     """Hitung streak hari berturut-turut yang punya transaksi, mundur dari hari ini."""
-    today = date.today()
+    today = datetime.now(JAKARTA_TZ).date()
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -757,3 +762,214 @@ def sales_summary_range(user_id: int, start_date: date, end_date: date) -> dict[
         "modal": sum(int(r["modal_total"]) for r in rows),
         "laba": sum(int(r["laba"]) for r in rows),
     }
+
+# =========================
+# v11 aesthetic extensions
+# =========================
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
+def _init_v11_extras() -> None:
+    with get_conn() as conn:
+        _ensure_column(conn, "transactions", "item_name", "item_name TEXT")
+        _ensure_column(conn, "transactions", "tag", "tag TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY,
+                theme TEXT NOT NULL DEFAULT 'soft',
+                default_payment TEXT DEFAULT 'cash',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wishlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                item_name TEXT NOT NULL,
+                kategori TEXT NOT NULL,
+                nominal INTEGER NOT NULL CHECK(nominal > 0),
+                status TEXT NOT NULL DEFAULT 'planned',
+                created_at TEXT NOT NULL,
+                bought_at TEXT
+            )
+            """
+        )
+
+_old_init_db_v11 = init_db
+
+def init_db() -> None:  # type: ignore[override]
+    _old_init_db_v11()
+    _init_v11_extras()
+
+
+def get_user_theme(user_id: int) -> str:
+    with get_conn() as conn:
+        row = conn.execute("SELECT theme FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
+        return (row["theme"] if row else "soft") or "soft"
+
+
+def set_user_theme(user_id: int, theme: str) -> str:
+    theme = (theme or "soft").strip().lower()
+    if theme not in {"soft", "clean", "cute"}:
+        raise ValueError("Theme cuma bisa: soft, clean, cute")
+    ts = now_iso()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_settings(user_id, theme, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET theme=excluded.theme, updated_at=excluded.updated_at
+            """,
+            (user_id, theme, ts, ts),
+        )
+    return theme
+
+
+def _smart_category(name: str, tipe: str = "keluar") -> str:
+    raw = normalize_category(name)
+    aliases = {
+        "spay": "marketplace", "shopee": "marketplace", "lzd": "marketplace", "lazada": "marketplace", "tokopedia": "marketplace",
+        "skincare": "beauty", "makeup": "beauty", "sheetmask": "beauty", "sunscreen": "beauty", "contour": "beauty",
+        "makan": "food", "jajan": "food", "snack": "food", "ramen": "food", "mie": "food", "kopi": "food",
+        "dapur": "grocery", "sembako": "grocery", "terigu": "grocery", "belanja": "shopping",
+        "cashback": "cashback", "jualan": "jualan", "gaji": "gaji",
+    }
+    return aliases.get(raw, raw or ("income" if tipe == "masuk" else "other"))
+
+
+_old_add_transaction_v11 = add_transaction
+
+def add_transaction(user_id: int, tipe: str, nominal: int, kategori: str, catatan: str = "", created_at: str | None = None, payment_method: str = "cash", tag: str = "") -> int:  # type: ignore[override]
+    kategori = _smart_category(kategori, tipe)
+    item_name = (catatan or kategori).strip()
+    with get_conn() as conn:
+        _ensure_column(conn, "transactions", "item_name", "item_name TEXT")
+        _ensure_column(conn, "transactions", "tag", "tag TEXT")
+        display_id = _next_display_id(conn, user_id)
+        conn.execute(
+            """
+            INSERT INTO transactions(display_id, user_id, tipe, nominal, kategori, catatan, item_name, payment_method, tag, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (display_id, user_id, tipe, nominal, kategori, item_name, item_name, normalize_payment_method(payment_method), (tag or "").strip().lower(), created_at or now_iso()),
+        )
+        return display_id
+
+
+def _row_item(row: sqlite3.Row) -> str:
+    try:
+        return (row["item_name"] or row["catatan"] or row["kategori"] or "-").strip()
+    except Exception:
+        return (row["catatan"] or row["kategori"] or "-").strip()
+
+
+_old_update_transaction_v11 = update_transaction
+
+def update_transaction(user_id: int, transaction_id: int, nominal: int, kategori: str, catatan: str, created_at: str | None = None, payment_method: str | None = None) -> sqlite3.Row | None:  # type: ignore[override]
+    kategori = _smart_category(kategori)
+    item_name = (catatan or kategori).strip()
+    with get_conn() as conn:
+        _ensure_column(conn, "transactions", "item_name", "item_name TEXT")
+        _ensure_column(conn, "transactions", "tag", "tag TEXT")
+        old = conn.execute("SELECT id FROM transactions WHERE user_id=? AND display_id=?", (user_id, transaction_id)).fetchone()
+        if not old:
+            return None
+        internal_id = int(old["id"])
+        method = normalize_payment_method(payment_method)
+        if created_at:
+            conn.execute(
+                "UPDATE transactions SET nominal=?, kategori=?, catatan=?, item_name=?, payment_method=?, created_at=? WHERE user_id=? AND id=?",
+                (nominal, kategori, item_name, item_name, method, created_at, user_id, internal_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE transactions SET nominal=?, kategori=?, catatan=?, item_name=?, payment_method=? WHERE user_id=? AND id=?",
+                (nominal, kategori, item_name, item_name, method, user_id, internal_id),
+            )
+        _renumber_user_transactions(conn, user_id)
+        return conn.execute("SELECT * FROM transactions WHERE user_id=? AND id=?", (user_id, internal_id)).fetchone()
+
+
+_old_update_last_transaction_v11 = update_last_transaction
+
+def update_last_transaction(user_id: int, nominal: int, kategori: str, catatan: str, created_at: str | None = None, payment_method: str | None = None) -> sqlite3.Row | None:  # type: ignore[override]
+    last = get_last_transaction(user_id)
+    if not last:
+        return None
+    return update_transaction(user_id, int(last["display_id"] or last["id"]), nominal, kategori, catatan, created_at, payment_method)
+
+
+def find_recent_duplicate(user_id: int, tipe: str, item_name: str, nominal: int, minutes: int = 10) -> sqlite3.Row | None:
+    cutoff = (datetime.now(JAKARTA_TZ).replace(tzinfo=None) - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    kw = (item_name or "").strip().lower()
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT * FROM transactions
+            WHERE user_id=? AND tipe=? AND nominal=? AND lower(COALESCE(item_name, catatan, ''))=? AND datetime(created_at) >= datetime(?)
+            ORDER BY datetime(created_at) DESC, id DESC LIMIT 1
+            """,
+            (user_id, tipe, nominal, kw, cutoff),
+        ).fetchone()
+
+
+def add_wishlist(user_id: int, item_name: str, kategori: str, nominal: int) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO wishlist(user_id, item_name, kategori, nominal, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, item_name.strip(), _smart_category(kategori), nominal, now_iso()),
+        )
+        return int(cur.lastrowid)
+
+
+def list_wishlist(user_id: int) -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return list(conn.execute("SELECT * FROM wishlist WHERE user_id=? AND status='planned' ORDER BY id DESC", (user_id,)).fetchall())
+
+
+def mark_wishlist_bought(user_id: int, wish_id: int, payment_method: str = "cash") -> int | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM wishlist WHERE user_id=? AND id=? AND status='planned'", (user_id, wish_id)).fetchone()
+        if not row:
+            return None
+        conn.execute("UPDATE wishlist SET status='bought', bought_at=? WHERE user_id=? AND id=?", (now_iso(), user_id, wish_id))
+    return add_transaction(user_id, "keluar", int(row["nominal"]), row["kategori"], row["item_name"], None, payment_method)
+
+
+def export_transactions_csv(user_id: int, path: Path) -> None:  # type: ignore[override]
+    rows = list_transactions(user_id, 10_000)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["id", "tanggal_wib", "jenis", "nama_barang", "kategori", "harga", "metode_bayar", "tag"])
+        for r in reversed(rows):
+            try:
+                item = r["item_name"] or r["catatan"] or ""
+                tag = r["tag"] or ""
+            except Exception:
+                item = r["catatan"] or ""
+                tag = ""
+            writer.writerow([r["display_id"] or r["id"], r["created_at"], r["tipe"], item, r["kategori"], r["nominal"], r["payment_method"], tag])
+
+def search_transactions(user_id: int, keyword: str, limit: int = 20) -> list[sqlite3.Row]:  # type: ignore[override]
+    kw = f"%{keyword.strip().lower()}%"
+    limit = max(1, min(limit, 50))
+    with get_conn() as conn:
+        return list(conn.execute(
+            """
+            SELECT * FROM transactions
+            WHERE user_id=? AND (
+                lower(kategori) LIKE ? OR lower(COALESCE(catatan, '')) LIKE ? OR lower(COALESCE(item_name, '')) LIKE ? OR lower(COALESCE(payment_method, '')) LIKE ?
+            )
+            ORDER BY datetime(created_at) DESC, id DESC
+            LIMIT ?
+            """,
+            (user_id, kw, kw, kw, kw, limit),
+        ).fetchall())

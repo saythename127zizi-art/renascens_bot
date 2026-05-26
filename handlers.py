@@ -76,6 +76,7 @@ async def add_transaction_command(update: Update, context: ContextTypes.DEFAULT_
         nominal, kategori, catatan, created_at, payment_method = parse_transaction_args_with_date(context.args)
         if not db.category_exists(user_id, tipe, kategori):
             db.add_category(user_id, tipe, kategori)
+        duplicate = db.find_recent_duplicate(user_id, tipe, catatan or kategori, nominal)
         transaction_id = db.add_transaction(user_id, tipe, nominal, kategori, catatan, created_at, payment_method)
         row = db.get_transaction(user_id, transaction_id)
         keyboard = InlineKeyboardMarkup([
@@ -85,8 +86,11 @@ async def add_transaction_command(update: Update, context: ContextTypes.DEFAULT_
             ],
             [InlineKeyboardButton("📘 Lihat hari ini", callback_data="report_today")],
         ])
+        msg = format_success(row, db.activity_streak(user_id))
+        if duplicate:
+            msg += "\n\n⚠️ Mirip transaksi yang baru kamu input. Kalau dobel, pakai `/undo` atau `/del ID`."
         await update.message.reply_text(
-            format_success(row, db.activity_streak(user_id)),
+            msg,
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=keyboard,
         )
@@ -976,6 +980,74 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text("Aduh ada error kecil 😭 Coba ulangi command-nya ya.")
 
 
+
+async def theme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = ensure_user_from_update(update)
+    if not context.args:
+        current = db.get_user_theme(user_id)
+        await update.message.reply_text(
+            f"🎨 Theme kamu sekarang: *{current}*\n\nPilih: `/theme soft`, `/theme clean`, atau `/theme cute`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    try:
+        theme = db.set_user_theme(user_id, context.args[0])
+        await update.message.reply_text(f"✅ Theme diganti ke *{theme}*. Report berikutnya pakai vibe yang lebih clean/aesthetic ✨", parse_mode=ParseMode.MARKDOWN)
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+
+
+async def wish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = ensure_user_from_update(update)
+    raw = " ".join(context.args).strip()
+    if not raw or "|" not in raw:
+        await update.message.reply_text("Format: `/wish barang | kategori | harga`\nContoh: `/wish cushion | beauty | 85000`", parse_mode=ParseMode.MARKDOWN)
+        return
+    parts = [x.strip() for x in raw.split("|") if x.strip()]
+    if len(parts) < 3:
+        await update.message.reply_text("Format: `/wish barang | kategori | harga`", parse_mode=ParseMode.MARKDOWN)
+        return
+    try:
+        item, kategori, nominal = parts[0], parts[1], parse_nominal(parts[2])
+        wish_id = db.add_wishlist(user_id, item, kategori, nominal)
+        await update.message.reply_text(f"🛍️ Wishlist ditambah!\nID #{wish_id} • *{item}* • {rupiah(nominal)}", parse_mode=ParseMode.MARKDOWN)
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+
+
+async def wishlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = ensure_user_from_update(update)
+    rows = db.list_wishlist(user_id)
+    if not rows:
+        await update.message.reply_text("Wishlist masih kosong. Tambah pakai `/wish barang | kategori | harga`", parse_mode=ParseMode.MARKDOWN)
+        return
+    lines = ["🛍️ *Wishlist*"]
+    for r in rows[:30]:
+        lines.append(f"#{r['id']} • *{r['item_name']}* • {r['kategori']} • {rupiah(r['nominal'])}")
+    lines.append("\nKalau sudah kebeli: `/bought ID [metode]`")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def bought(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = ensure_user_from_update(update)
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Format: `/bought ID metode`\nContoh: `/bought 3 shopeepay`", parse_mode=ParseMode.MARKDOWN)
+        return
+    wish_id = int(context.args[0])
+    method = normalize_payment_method(" ".join(context.args[1:]) or "cash")
+    tid = db.mark_wishlist_bought(user_id, wish_id, method)
+    if not tid:
+        await update.message.reply_text("Wishlist ID itu nggak ketemu / sudah dibeli.")
+        return
+    row = db.get_transaction(user_id, tid)
+    await update.message.reply_text("✅ Wishlist ditandai sudah dibeli dan masuk transaksi:\n\n" + format_transaction(row), parse_mode=ParseMode.MARKDOWN)
+
+
+async def close_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    start, end = range_this_month()
+    await report(update, context, f"Monthly Wrap-Up ({start.isoformat()} s/d {end.isoformat()})", start, end)
+
+
 def get_handlers():
     conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^(➖ Catat Pengeluaran|➕ Catat Pemasukan)$"), interactive_start)],
@@ -1031,6 +1103,11 @@ def get_handlers():
         CommandHandler(["riwayat", "r", "history"], riwayat),
         CommandHandler(["export_csv", "csv", "export"], export_csv),
         CommandHandler(["stat", "s", "stats"], stat),
+        CommandHandler(["theme"], theme_command),
+        CommandHandler(["wish"], wish),
+        CommandHandler(["wishlist", "wishes"], wishlist),
+        CommandHandler(["bought"], bought),
+        CommandHandler(["close_month", "wrapup"], close_month),
         CommandHandler(["utang", "u", "debt"], utang),
         CommandHandler(["piutang", "pu", "receivable"], piutang),
         CommandHandler(["daftar_utang", "du", "debts"], daftar_utang),
