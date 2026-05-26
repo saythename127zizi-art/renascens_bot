@@ -602,7 +602,13 @@ def format_summary(title: str, summary: dict) -> str:  # type: ignore[override]
     lines.append("\n🧾 *Recent*")
     for r in rows[:5]:
         lines.append(format_transaction_one_line(r))
-    lines.append("\n/detail_today for full report ✨")
+    lower_title = title.lower()
+    if "bulan" in lower_title or "month" in lower_title:
+        lines.append("\n`/detail_month` for full report ✨")
+    elif "hari" in lower_title or "today" in lower_title:
+        lines.append("\n`/detail_today` for full report ✨")
+    else:
+        lines.append("\n`/history` for transaction list ✨")
     return "\n".join(lines)
 
 

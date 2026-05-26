@@ -70,6 +70,41 @@ def ensure_user_from_update(update: Update) -> int:
     return user.id
 
 
+def _strip_markdown(text: str) -> str:
+    # Fallback kalau Telegram menolak Markdown karena ada karakter user yang aneh.
+    return text.replace("*", "").replace("`", "").replace("_", "")
+
+
+def _split_long_text(text: str, limit: int = 3600) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    length = 0
+    for line in text.splitlines():
+        extra = len(line) + 1
+        if current and length + extra > limit:
+            chunks.append("\n".join(current))
+            current = [line]
+            length = extra
+        else:
+            current.append(line)
+            length += extra
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [text]
+
+
+async def reply_markdown_safe(update: Update, text: str, reply_markup=None) -> None:
+    message = update.effective_message
+    if not message:
+        return
+    for chunk in _split_long_text(text):
+        try:
+            await message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+        except Exception:
+            await message.reply_text(_strip_markdown(chunk), reply_markup=reply_markup)
+        reply_markup = None
+
+
 async def add_transaction_command(update: Update, context: ContextTypes.DEFAULT_TYPE, tipe: str) -> None:
     user_id = ensure_user_from_update(update)
     try:
@@ -243,13 +278,13 @@ async def kategori(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, start: date, end: date) -> None:
     user_id = ensure_user_from_update(update)
     summary = db.summarize_range(user_id, start, end)
-    await update.message.reply_text(format_summary(title, summary), parse_mode=ParseMode.MARKDOWN)
+    await reply_markdown_safe(update, format_summary(title, summary))
 
 
 async def report_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, start: date, end: date) -> None:
     user_id = ensure_user_from_update(update)
     summary = db.summarize_range(user_id, start, end)
-    await update.message.reply_text(format_summary_detail(title, summary), parse_mode=ParseMode.MARKDOWN)
+    await reply_markdown_safe(update, format_summary_detail(title, summary))
 
 
 async def hariini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -270,6 +305,11 @@ async def mingguini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def bulanini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     start, end = range_this_month()
     await report(update, context, f"Laporan Bulan Ini ({start.isoformat()} s/d {end.isoformat()})", start, end)
+
+
+async def detail_bulanini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    start, end = range_this_month()
+    await report_detail(update, context, f"Bulan Ini ({start.isoformat()} s/d {end.isoformat()})", start, end)
 
 
 async def tahunini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -827,7 +867,7 @@ async def jual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def laporan_laba(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, start: date, end: date) -> None:
     user_id = ensure_user_from_update(update)
     summary = db.sales_summary_range(user_id, start, end)
-    await update.message.reply_text(format_sales_summary(title, summary), parse_mode=ParseMode.MARKDOWN)
+    await reply_markdown_safe(update, format_sales_summary(title, summary))
 
 
 async def laba_hariini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1083,6 +1123,7 @@ def get_handlers():
         CommandHandler(["detail_hariini", "dh", "detail_today", "daily"], detail_hariini),
         CommandHandler(["mingguini", "mg", "week"], mingguini),
         CommandHandler(["bulanini", "b", "month"], bulanini),
+        CommandHandler(["detail_bulanini", "detail_month", "dm"], detail_bulanini),
         CommandHandler(["tahunini", "t", "year"], tahunini),
         CommandHandler(["range", "rg", "period"], range_report),
         CommandHandler(["budget", "bd"], budget),
