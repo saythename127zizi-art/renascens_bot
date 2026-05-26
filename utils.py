@@ -16,6 +16,48 @@ def rupiah(value: int | float | None) -> str:
     return "Rp" + f"{value:,}".replace(",", ".")
 
 
+def normalize_payment_method(name: str | None) -> str:
+    raw = (name or "cash").strip().lower().replace("_", " ").replace("-", " ")
+    raw = " ".join(raw.split())
+    aliases = {
+        "tunai": "cash", "cash": "cash",
+        "qris": "qris", "qr": "qris",
+        "spay": "shopeepay", "shopee pay": "shopeepay", "shopeepay": "shopeepay",
+        "dana": "dana", "gopay": "gopay", "go pay": "gopay", "ovo": "ovo",
+        "bank": "bank", "transfer": "bank", "tf": "bank",
+        "bca": "bca", "bri": "bri", "bni": "bni", "mandiri": "mandiri", "blu": "blu", "seabank": "seabank",
+        "spaylater": "spaylater", "paylater": "paylater", "kartu": "kartu", "card": "kartu",
+        "lainnya": "lainnya",
+    }
+    return aliases.get(raw, raw or "cash")
+
+
+def parse_payment_hint(raw: str) -> tuple[str, str]:
+    """Ambil metode pembayaran dari teks.
+
+    Bisa pakai:
+    - @qris di akhir
+    - via qris di akhir
+    - | qris sebagai part terpisah
+    """
+    text = raw.strip()
+    payment = "cash"
+
+    # Format cepat: /out 12000 makan seblak @qris
+    parts = text.split()
+    if parts and parts[-1].startswith("@") and len(parts[-1]) > 1:
+        payment = normalize_payment_method(parts[-1][1:])
+        text = " ".join(parts[:-1]).strip()
+        return text, payment
+
+    # Format natural: /out 12000 makan seblak via qris
+    if len(parts) >= 2 and parts[-2].lower() in {"via", "pakai", "pake"}:
+        payment = normalize_payment_method(parts[-1])
+        text = " ".join(parts[:-2]).strip()
+
+    return text, payment
+
+
 def parse_nominal(raw: str) -> int:
     cleaned = raw.lower().replace("rp", "").replace(".", "").replace(",", "").strip()
     if cleaned.endswith("k"):
@@ -35,6 +77,45 @@ def parse_transaction_args(args: list[str]) -> tuple[int, str, str]:
     kategori = args[1].lower().strip()
     catatan = " ".join(args[2:]).strip() if len(args) > 2 else ""
     return nominal, kategori, catatan
+
+
+def transaction_display_id(row) -> int:
+    try:
+        return int(row["display_id"] or row["id"])
+    except Exception:
+        return int(row["id"])
+
+
+def parse_transaction_args_with_date(args: list[str]) -> tuple[int, str, str, str | None, str]:
+    """Parse transaksi + optional tanggal manual + metode pembayaran.
+
+    Format:
+    /out 12000 makan seblak
+    /out 12000 makan seblak @qris
+    /out 12000 makan seblak | 2026-05-25 | qris
+    /out 12000 makan seblak via dana
+    """
+    raw = " ".join(args).strip()
+    created_at = None
+    payment_method = "cash"
+
+    if "|" in raw:
+        parts = [p.strip() for p in raw.split("|") if p.strip()]
+        raw = parts[0] if parts else raw
+        for extra in parts[1:]:
+            try:
+                d = parse_date(extra)
+                now = datetime.now(JAKARTA_TZ)
+                created_at = datetime(d.year, d.month, d.day, now.hour, now.minute, now.second).isoformat(timespec="seconds")
+            except ValueError:
+                payment_method = normalize_payment_method(extra)
+
+    raw, hinted_payment = parse_payment_hint(raw)
+    if hinted_payment != "cash":
+        payment_method = hinted_payment
+
+    nominal, kategori, catatan = parse_transaction_args(raw.split())
+    return nominal, kategori, catatan, created_at, payment_method
 
 
 def parse_date(raw: str) -> date:
@@ -88,9 +169,10 @@ def format_transaction(row) -> str:
     tanggal = row["created_at"][:16].replace("T", " ")
     note = row["catatan"] or "-"
     return (
-        f"{sign} *ID #{row['id']}* • {tipe}\n"
+        f"{sign} *ID #{transaction_display_id(row)}* • {tipe}\n"
         f"   Nominal: *{rupiah(row['nominal'])}*\n"
         f"   Kategori: `{row['kategori']}`\n"
+        f"   Metode: `{row['payment_method']}`\n"
         f"   Catatan: {note}\n"
         f"   Waktu: {tanggal}"
     )
@@ -100,7 +182,7 @@ def format_transaction_one_line(row) -> str:
     sign = "➕" if row["tipe"] == "masuk" else "➖"
     note = f" — {row['catatan']}" if row["catatan"] else ""
     jam = row["created_at"][11:16]
-    return f"{sign} *ID #{row['id']}* • {jam} • `{row['kategori']}` • *{rupiah(row['nominal'])}*{note}"
+    return f"{sign} *ID #{transaction_display_id(row)}* • {jam} • `{row['kategori']}` • `{row['payment_method']}` • *{rupiah(row['nominal'])}*{note}"
 
 
 def format_success(row, streak: int = 0) -> str:
@@ -111,13 +193,14 @@ def format_success(row, streak: int = 0) -> str:
     return (
         f"✅ *Berhasil dicatat!*\n\n"
         f"{sign} *{tipe}*\n"
-        f"🆔 ID: *#{row['id']}*\n"
+        f"🆔 ID: *#{transaction_display_id(row)}*\n"
         f"💸 Nominal: *{rupiah(row['nominal'])}*\n"
         f"🏷️ Kategori: `{row['kategori']}`\n"
+        f"💳 Metode: `{row['payment_method']}`\n"
         f"📝 Catatan: {note}"
         f"{streak_line}\n\n"
-        f"Edit: `/edit {row['id']} {row['nominal']} {row['kategori']} {note if note != '-' else ''}`\n"
-        f"Delete: `/del {row['id']}`"
+        f"Edit: `/edit {transaction_display_id(row)} {row['nominal']} {row['kategori']} {note if note != '-' else ''} @{row['payment_method']}`\n"
+        f"Delete: `/del {transaction_display_id(row)}`"
     )
 
 
@@ -131,6 +214,7 @@ def format_summary(title: str, summary: dict) -> str:
     rows = summary.get("rows", [])
     expense_cats = [r for r in summary.get("per_cat", []) if r["tipe"] == "keluar"]
     income_cats = [r for r in summary.get("per_cat", []) if r["tipe"] == "masuk"]
+    payment_out = [r for r in summary.get("per_payment", []) if r["tipe"] == "keluar"]
 
     lines = [f"📘 *{title}*", ""]
     lines.append("━━━━━━━━━━━━━━━━")
@@ -153,6 +237,10 @@ def format_summary(title: str, summary: dict) -> str:
         lines.append("\n🌱 *Top pemasukan:*")
         for i, r in enumerate(income_cats[:2], 1):
             lines.append(f"{i}. `{r['kategori']}` — *{rupiah(r['total'])}* ({r['jumlah']}x)")
+    if payment_out:
+        lines.append("\n💳 *Metode paling kepakai:*")
+        for i, r in enumerate(payment_out[:3], 1):
+            lines.append(f"{i}. `{r['payment_method']}` — *{rupiah(r['total'])}* ({r['jumlah']}x)")
 
     lines.append("\n🧾 *Transaksi terakhir:*")
     for r in rows[:3]:
@@ -177,6 +265,12 @@ def format_summary_detail(title: str, summary: dict) -> str:
     else:
         lines.append("\nBelum ada transaksi di periode ini.")
 
+    if summary.get("per_payment"):
+        lines.append("\n💳 *Breakdown metode pembayaran:*")
+        for r in summary["per_payment"]:
+            icon = "➕" if r["tipe"] == "masuk" else "➖"
+            lines.append(f"{icon} `{r['payment_method']}`: *{rupiah(r['total'])}* ({r['jumlah']}x)")
+
     if summary["rows"]:
         lines.append("\n🧾 *Semua transaksi periode ini:*")
         for r in summary["rows"][:30]:
@@ -190,8 +284,10 @@ def help_text() -> str:
         "Hai! Aku *DuitKu Bot* 💸\n\n"
         "Biar keliatan lebih clean, kamu bisa pakai command style English. Command Indonesia lama tetap aktif kok.\n\n"
         "✨ *Daily money log:*\n"
-        "`/out 12000 makan seblak` → catat pengeluaran\n"
-        "`/in 45000 jualan mie` → catat pemasukan\n"
+        "`/out 12000 makan seblak @qris` → catat pengeluaran + metode bayar\n"
+        "`/in 45000 jualan mie @cash` → catat pemasukan + metode terima\n"
+        "`/out 12000 makan seblak | 2026-05-25 | dana` → tanggal + metode\n"
+        "`/bulk` / `/bulk_out` / `/bulk_in` → input banyak sekaligus\n"
         "`/today` → ringkasan hari ini\n"
         "`/month` → ringkasan bulan ini\n"
         "`/history` → transaksi terakhir\n"
@@ -199,13 +295,19 @@ def help_text() -> str:
         "✏️ *Fix transaksi by ID:*\n"
         "`/edit 13 12000 makan seblak` → edit ID #13\n"
         "`/del 13` → hapus ID #13\n"
-        "`/view 13` → lihat detail ID #13\n\n"
+        "`/undo` → hapus transaksi terakhir\n"
+        "`/view 13` → lihat detail ID #13\n"
+        "`/rename_cat lzd | marketplace` → rapihin kategori\n"
+        "`/search seblak` → cari transaksi\n"
+        "`/cat makan` → filter kategori\n"
+        "`/pay 13 qris` → ganti metode bayar ID #13\n"
+        "`/method qris` → lihat transaksi metode qris\n\n"
         "🛒 *Selling mode:*\n"
         "`/product indomie soto | 2200 | 4000 | 10` → tambah produk\n"
         "`/sell 1 2 pembeli tetangga` → catat penjualan\n"
         "`/stock` → lihat stok\n"
         "`/profit` → laba bulan ini\n\n"
-        "Versi super cepat juga masih bisa: `/k`, `/m`, `/h`, `/b`, `/r`, `/s`. "
+        "Catatan: ID transaksi sekarang dirapikan lagi setelah delete, jadi nggak lompat-lompat ✨\n"
         "Pakai tombol menu di bawah kalau lagi males ngetik ✨"
     )
 
@@ -230,7 +332,7 @@ def parse_product_args(args: list[str]) -> tuple[str, int, int, int]:
 def format_product(row) -> str:
     laba_satuan = int(row["harga_jual"]) - int(row["modal"])
     return (
-        f"#{row['id']} {row['nama']}\n"
+        f"#{transaction_display_id(row)} {row['nama']}\n"
         f"   Modal: {rupiah(row['modal'])} • Jual: {rupiah(row['harga_jual'])} • Laba/pcs: {rupiah(laba_satuan)} • Stok: {row['stok']}"
     )
 
@@ -238,7 +340,7 @@ def format_product(row) -> str:
 def format_sale(row) -> str:
     tanggal = row["created_at"][:16].replace("T", " ")
     note = f" — {row['catatan']}" if row["catatan"] else ""
-    return f"🛒 #{row['id']} {tanggal} • {row['nama_barang']} x{row['qty']} • Omzet {rupiah(row['omzet'])} • Laba {rupiah(row['laba'])}{note}"
+    return f"🛒 #{transaction_display_id(row)} {tanggal} • {row['nama_barang']} x{row['qty']} • Omzet {rupiah(row['omzet'])} • Laba {rupiah(row['laba'])}{note}"
 
 
 def format_sales_summary(title: str, summary: dict) -> str:

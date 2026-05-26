@@ -69,11 +69,13 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_id INTEGER,
                 user_id INTEGER NOT NULL,
                 tipe TEXT NOT NULL CHECK(tipe IN ('masuk', 'keluar')),
                 nominal INTEGER NOT NULL CHECK(nominal > 0),
                 kategori TEXT NOT NULL,
                 catatan TEXT,
+                payment_method TEXT NOT NULL DEFAULT 'cash',
                 created_at TEXT NOT NULL
             );
 
@@ -143,6 +145,79 @@ def init_db() -> None:
             );
             """
         )
+        _ensure_transaction_payment_method(conn)
+        _ensure_transaction_display_ids(conn)
+
+
+
+def _ensure_transaction_payment_method(conn: sqlite3.Connection) -> None:
+    """Migrasi kolom metode pembayaran untuk database lama."""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+    if "payment_method" not in cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'cash'")
+
+def normalize_payment_method(name: str | None) -> str:
+    raw = (name or "cash").strip().lower()
+    raw = raw.replace("_", " ").replace("-", " ")
+    raw = " ".join(raw.split())
+    aliases = {
+        "tunai": "cash",
+        "cash": "cash",
+        "qris": "qris",
+        "qr": "qris",
+        "shopeepay": "shopeepay",
+        "shopee pay": "shopeepay",
+        "spay": "shopeepay",
+        "dana": "dana",
+        "gopay": "gopay",
+        "go pay": "gopay",
+        "ovo": "ovo",
+        "bank": "bank",
+        "transfer": "bank",
+        "tf": "bank",
+        "bca": "bca",
+        "bri": "bri",
+        "bni": "bni",
+        "mandiri": "mandiri",
+        "blu": "blu",
+        "seabank": "seabank",
+        "spaylater": "spaylater",
+        "paylater": "paylater",
+        "kartu": "kartu",
+        "card": "kartu",
+        "lainnya": "lainnya",
+    }
+    return aliases.get(raw, raw or "cash")
+
+def _ensure_transaction_display_ids(conn: sqlite3.Connection) -> None:
+    """Migrasi ID tampilan transaksi agar ID user rapi 1..N per user.
+
+    Primary key internal tetap `id`, tapi user melihat `display_id`.
+    Setelah transaksi dihapus, display_id dirapikan lagi supaya tidak lompat.
+    """
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+    if "display_id" not in cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN display_id INTEGER")
+    user_ids = [r[0] for r in conn.execute("SELECT DISTINCT user_id FROM transactions ORDER BY user_id").fetchall()]
+    for uid in user_ids:
+        _renumber_user_transactions(conn, int(uid))
+
+
+def _renumber_user_transactions(conn: sqlite3.Connection, user_id: int) -> None:
+    rows = conn.execute(
+        "SELECT id FROM transactions WHERE user_id=? ORDER BY datetime(created_at), id",
+        (user_id,),
+    ).fetchall()
+    for idx, row in enumerate(rows, 1):
+        conn.execute("UPDATE transactions SET display_id=? WHERE id=?", (idx, row[0]))
+
+
+def _next_display_id(conn: sqlite3.Connection, user_id: int) -> int:
+    row = conn.execute(
+        "SELECT COALESCE(MAX(display_id), 0) + 1 AS next_id FROM transactions WHERE user_id=?",
+        (user_id,),
+    ).fetchone()
+    return int(row["next_id"] or 1)
 
 
 def now_iso() -> str:
@@ -210,14 +285,15 @@ def normalize_category(name: str) -> str:
     return " ".join(name.strip().lower().split())
 
 
-def add_transaction(user_id: int, tipe: str, nominal: int, kategori: str, catatan: str = "") -> int:
+def add_transaction(user_id: int, tipe: str, nominal: int, kategori: str, catatan: str = "", created_at: str | None = None, payment_method: str = "cash") -> int:
     kategori = normalize_category(kategori)
     with get_conn() as conn:
+        display_id = _next_display_id(conn, user_id)
         cur = conn.execute(
-            "INSERT INTO transactions(user_id, tipe, nominal, kategori, catatan, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, tipe, nominal, kategori, catatan.strip(), now_iso()),
+            "INSERT INTO transactions(display_id, user_id, tipe, nominal, kategori, catatan, payment_method, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (display_id, user_id, tipe, nominal, kategori, catatan.strip(), normalize_payment_method(payment_method), created_at or now_iso()),
         )
-        return int(cur.lastrowid)
+        return display_id
 
 
 def get_last_transaction(user_id: int) -> sqlite3.Row | None:
@@ -229,33 +305,46 @@ def get_last_transaction(user_id: int) -> sqlite3.Row | None:
 
 
 def delete_transaction(user_id: int, transaction_id: int) -> bool:
+    """Hapus berdasarkan ID tampilan user, lalu rapikan lagi ID tampilannya."""
     with get_conn() as conn:
         cur = conn.execute(
-            "DELETE FROM transactions WHERE user_id=? AND id=?",
+            "DELETE FROM transactions WHERE user_id=? AND display_id=?",
             (user_id, transaction_id),
         )
+        if cur.rowcount:
+            _renumber_user_transactions(conn, user_id)
         return cur.rowcount > 0
-
 
 
 def get_transaction(user_id: int, transaction_id: int) -> sqlite3.Row | None:
     with get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM transactions WHERE user_id=? AND id=?",
+            "SELECT * FROM transactions WHERE user_id=? AND display_id=?",
             (user_id, transaction_id),
         ).fetchone()
 
 
-def update_transaction(user_id: int, transaction_id: int, nominal: int, kategori: str, catatan: str) -> sqlite3.Row | None:
+def update_transaction(user_id: int, transaction_id: int, nominal: int, kategori: str, catatan: str, created_at: str | None = None, payment_method: str | None = None) -> sqlite3.Row | None:
     with get_conn() as conn:
-        cur = conn.execute(
-            "UPDATE transactions SET nominal=?, kategori=?, catatan=? WHERE user_id=? AND id=?",
-            (nominal, normalize_category(kategori), catatan.strip(), user_id, transaction_id),
-        )
-        if cur.rowcount == 0:
+        old = conn.execute(
+            "SELECT id FROM transactions WHERE user_id=? AND display_id=?",
+            (user_id, transaction_id),
+        ).fetchone()
+        if not old:
             return None
-    return get_transaction(user_id, transaction_id)
-
+        internal_id = int(old["id"])
+        if created_at:
+            conn.execute(
+                "UPDATE transactions SET nominal=?, kategori=?, catatan=?, payment_method=?, created_at=? WHERE user_id=? AND id=?",
+                (nominal, normalize_category(kategori), catatan.strip(), normalize_payment_method(payment_method), created_at, user_id, internal_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE transactions SET nominal=?, kategori=?, catatan=?, payment_method=? WHERE user_id=? AND id=?",
+                (nominal, normalize_category(kategori), catatan.strip(), normalize_payment_method(payment_method), user_id, internal_id),
+            )
+        _renumber_user_transactions(conn, user_id)
+        return conn.execute("SELECT * FROM transactions WHERE user_id=? AND id=?", (user_id, internal_id)).fetchone()
 
 def activity_streak(user_id: int) -> int:
     """Hitung streak hari berturut-turut yang punya transaksi, mundur dari hari ini."""
@@ -278,17 +367,69 @@ def activity_streak(user_id: int) -> int:
         cur = cur.replace() - timedelta(days=1)
     return streak
 
-def update_last_transaction(user_id: int, nominal: int, kategori: str, catatan: str) -> sqlite3.Row | None:
+def update_last_transaction(user_id: int, nominal: int, kategori: str, catatan: str, created_at: str | None = None, payment_method: str | None = None) -> sqlite3.Row | None:
     last = get_last_transaction(user_id)
     if not last:
         return None
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE transactions SET nominal=?, kategori=?, catatan=? WHERE user_id=? AND id=?",
-            (nominal, normalize_category(kategori), catatan.strip(), user_id, last["id"]),
-        )
+        if created_at:
+            conn.execute(
+                "UPDATE transactions SET nominal=?, kategori=?, catatan=?, payment_method=?, created_at=? WHERE user_id=? AND id=?",
+                (nominal, normalize_category(kategori), catatan.strip(), normalize_payment_method(payment_method), created_at, user_id, last["id"]),
+            )
+            _renumber_user_transactions(conn, user_id)
+        else:
+            conn.execute(
+                "UPDATE transactions SET nominal=?, kategori=?, catatan=?, payment_method=? WHERE user_id=? AND id=?",
+                (nominal, normalize_category(kategori), catatan.strip(), normalize_payment_method(payment_method), user_id, last["id"]),
+            )
     return get_last_transaction(user_id)
 
+
+def rename_category(user_id: int, old_name: str, new_name: str) -> int:
+    old = normalize_category(old_name)
+    new = normalize_category(new_name)
+    if not old or not new:
+        raise ValueError("Nama kategori tidak boleh kosong.")
+    with get_conn() as conn:
+        conn.execute("UPDATE categories SET name=? WHERE user_id=? AND name=?", (new, user_id, old))
+        cur = conn.execute("UPDATE transactions SET kategori=? WHERE user_id=? AND kategori=?", (new, user_id, old))
+        return int(cur.rowcount or 0)
+
+
+def search_transactions(user_id: int, keyword: str, limit: int = 20) -> list[sqlite3.Row]:
+    kw = f"%{keyword.strip().lower()}%"
+    limit = max(1, min(limit, 50))
+    with get_conn() as conn:
+        return list(conn.execute(
+            """
+            SELECT * FROM transactions
+            WHERE user_id=? AND (lower(kategori) LIKE ? OR lower(COALESCE(catatan, '')) LIKE ?)
+            ORDER BY datetime(created_at) DESC, id DESC
+            LIMIT ?
+            """,
+            (user_id, kw, kw, limit),
+        ).fetchall())
+
+
+def filter_transactions_by_category(user_id: int, kategori: str, limit: int = 20) -> list[sqlite3.Row]:
+    kategori = normalize_category(kategori)
+    limit = max(1, min(limit, 50))
+    with get_conn() as conn:
+        return list(conn.execute(
+            "SELECT * FROM transactions WHERE user_id=? AND kategori=? ORDER BY datetime(created_at) DESC, id DESC LIMIT ?",
+            (user_id, kategori, limit),
+        ).fetchall())
+
+
+def filter_transactions_by_payment_method(user_id: int, payment_method: str, limit: int = 20) -> list[sqlite3.Row]:
+    method = normalize_payment_method(payment_method)
+    limit = max(1, min(limit, 50))
+    with get_conn() as conn:
+        return list(conn.execute(
+            "SELECT * FROM transactions WHERE user_id=? AND payment_method=? ORDER BY datetime(created_at) DESC, id DESC LIMIT ?",
+            (user_id, method, limit),
+        ).fetchall())
 
 def list_transactions(user_id: int, limit: int = 10) -> list[sqlite3.Row]:
     limit = max(1, min(limit, 50))
@@ -323,6 +464,18 @@ def summarize_range(user_id: int, start_date: date, end_date: date) -> dict[str,
                 (user_id, start, end),
             ).fetchall()
         )
+        per_payment = list(
+            conn.execute(
+                """
+                SELECT tipe, payment_method, SUM(nominal) AS total, COUNT(*) AS jumlah
+                FROM transactions
+                WHERE user_id=? AND datetime(created_at) BETWEEN datetime(?) AND datetime(?)
+                GROUP BY tipe, payment_method
+                ORDER BY tipe, total DESC
+                """,
+                (user_id, start, end),
+            ).fetchall()
+        )
     income = sum(int(r["nominal"]) for r in rows if r["tipe"] == "masuk")
     expense = sum(int(r["nominal"]) for r in rows if r["tipe"] == "keluar")
     biggest = None
@@ -335,6 +488,7 @@ def summarize_range(user_id: int, start_date: date, end_date: date) -> dict[str,
         "expense": expense,
         "balance": income - expense,
         "per_cat": per_cat,
+        "per_payment": per_payment,
         "biggest_expense": biggest,
     }
 
@@ -413,9 +567,9 @@ def export_transactions_csv(user_id: int, path: Path) -> None:
     rows = list_transactions(user_id, 10_000)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["id", "tanggal", "tipe", "nominal", "kategori", "catatan"])
+        writer.writerow(["id", "tanggal", "tipe", "nominal", "kategori", "payment_method", "catatan"])
         for r in reversed(rows):
-            writer.writerow([r["id"], r["created_at"], r["tipe"], r["nominal"], r["kategori"], r["catatan"] or ""])
+            writer.writerow([r["display_id"] or r["id"], r["created_at"], r["tipe"], r["nominal"], r["kategori"], r["payment_method"], r["catatan"] or ""])
 
 
 def stats_month(user_id: int, today: date) -> dict[str, Any]:
@@ -556,9 +710,10 @@ def add_sale(user_id: int, product_id: int, qty: int, catatan: str = "") -> int:
             (qty, now_iso(), user_id, product_id),
         )
         # Otomatis catat sebagai pemasukan kategori jualan agar laporan finansial tetap nyambung.
+        display_id = _next_display_id(conn, user_id)
         conn.execute(
-            "INSERT INTO transactions(user_id, tipe, nominal, kategori, catatan, created_at) VALUES (?, 'masuk', ?, 'jualan', ?, ?)",
-            (user_id, omzet, f"Penjualan {product['nama']} x{qty}. Laba {laba}", now_iso()),
+            "INSERT INTO transactions(display_id, user_id, tipe, nominal, kategori, catatan, payment_method, created_at) VALUES (?, ?, 'masuk', ?, 'jualan', ?, 'cash', ?)",
+            (display_id, user_id, omzet, f"Penjualan {product['nama']} x{qty}. Laba {laba}", now_iso()),
         )
         return int(cur.lastrowid)
 

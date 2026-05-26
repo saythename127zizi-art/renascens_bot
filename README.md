@@ -328,3 +328,58 @@ DB_PATH=/data/finance.db
 ```
 
 Kalau tidak pakai Volume, bot tetap jalan, tapi file `finance.db` bisa hilang saat Railway membuat container baru.
+
+## Update v8 - Daily Use Pack
+
+Fitur tambahan:
+
+- Bulk input tetap aktif:
+  - `/bulk`
+  - `/bulk_out`
+  - `/bulk_in`
+- Input tanggal manual/backdate:
+  - `/out 12000 makan seblak | 2026-05-25`
+  - `/in 5105 lzd x spay deals | 2026-05-25`
+- Undo cepat:
+  - `/undo`
+- Rapihin kategori:
+  - `/rename_cat lzd | marketplace`
+- Cari transaksi:
+  - `/search seblak`
+- Filter kategori:
+  - `/cat makan`
+- Backup manual:
+  - `/export_csv`
+  - `/backup_reminder on` sebagai pengingat chat.
+- ID transaksi sekarang memakai ID tampilan per user dan dirapikan ulang setelah delete.
+  Contoh: input ID #1 dan #2, hapus #2, lalu input lagi akan menjadi #2, bukan #3.
+
+Catatan penting: primary key internal database tetap aman. Yang dirapikan adalah ID yang kamu lihat dan pakai di command edit/delete/view.
+
+
+## Update v9 — Metode Pembayaran
+
+Sekarang transaksi bisa punya metode pembayaran/penerimaan.
+
+Contoh:
+
+```bash
+/out 12000 makan seblak @qris
+/in 50000 jualan mie @cash
+/out 25000 belanja sunscreen | 2026-05-25 | shopeepay
+/bulk
+- 12000 makan seblak @qris
+- 5000 jajan cilok @cash
++ 10000 cashback spay @shopeepay
+```
+
+Command tambahan:
+
+```bash
+/pay 13 qris      # ubah metode pembayaran ID #13
+/method qris      # lihat transaksi dengan metode qris
+```
+
+Metode yang umum dipakai: `cash`, `qris`, `shopeepay`, `dana`, `gopay`, `ovo`, `bank`, `bca`, `bri`, `bni`, `mandiri`, `blu`, `seabank`, `spaylater`, `paylater`, `kartu`, `lainnya`.
+
+CSV export sekarang ikut menyertakan kolom `payment_method`.

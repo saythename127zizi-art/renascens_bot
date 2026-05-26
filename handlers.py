@@ -32,6 +32,9 @@ from utils import (
     parse_nominal,
     parse_product_args,
     parse_transaction_args,
+    parse_transaction_args_with_date,
+    normalize_payment_method,
+    transaction_display_id,
     range_this_month,
     range_this_week,
     range_this_year,
@@ -40,8 +43,8 @@ from utils import (
     today_jakarta,
 )
 
-ASK_TIPE, ASK_KATEGORI, ASK_NOMINAL, ASK_CATATAN = range(4)
-SELL_MENU, SELL_PRODUCT, SELL_QTY, SELL_NOTE = range(4, 8)
+ASK_TIPE, ASK_KATEGORI, ASK_NOMINAL, ASK_CATATAN, ASK_PAYMENT = range(5)
+SELL_MENU, SELL_PRODUCT, SELL_QTY, SELL_NOTE = range(5, 9)
 
 
 def menu_keyboard() -> ReplyKeyboardMarkup:
@@ -70,10 +73,10 @@ def ensure_user_from_update(update: Update) -> int:
 async def add_transaction_command(update: Update, context: ContextTypes.DEFAULT_TYPE, tipe: str) -> None:
     user_id = ensure_user_from_update(update)
     try:
-        nominal, kategori, catatan = parse_transaction_args(context.args)
+        nominal, kategori, catatan, created_at, payment_method = parse_transaction_args_with_date(context.args)
         if not db.category_exists(user_id, tipe, kategori):
             db.add_category(user_id, tipe, kategori)
-        transaction_id = db.add_transaction(user_id, tipe, nominal, kategori, catatan)
+        transaction_id = db.add_transaction(user_id, tipe, nominal, kategori, catatan, created_at, payment_method)
         row = db.get_transaction(user_id, transaction_id)
         keyboard = InlineKeyboardMarkup([
             [
@@ -101,6 +104,112 @@ async def keluar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def masuk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await add_transaction_command(update, context, "masuk")
+
+
+def _parse_bulk_line(line: str, default_tipe: str | None = None) -> tuple[str, int, str, str, str | None, str]:
+    """Parse satu baris bulk.
+
+    Format campur:
+    - 12000 makan seblak
+    + 50000 jualan mie
+    out 12000 makan seblak
+    in 50000 jualan mie
+    """
+    raw = line.strip()
+    if not raw:
+        raise ValueError("baris kosong")
+
+    tipe = default_tipe
+    parts = raw.split()
+    if not parts:
+        raise ValueError("baris kosong")
+
+    prefix = parts[0].lower()
+    if prefix in {"-", "out", "keluar", "expense"}:
+        tipe = "keluar"
+        parts = parts[1:]
+    elif prefix in {"+", "in", "masuk", "income"}:
+        tipe = "masuk"
+        parts = parts[1:]
+
+    if tipe not in {"masuk", "keluar"}:
+        raise ValueError("pakai prefix +/in atau -/out")
+    if len(parts) < 2:
+        raise ValueError("format kurang lengkap")
+
+    nominal, kategori, catatan, created_at, payment_method = parse_transaction_args_with_date(parts)
+    return tipe, nominal, kategori, catatan, created_at, payment_method
+
+
+async def bulk_transaksi(update: Update, context: ContextTypes.DEFAULT_TYPE, default_tipe: str | None = None) -> None:
+    user_id = ensure_user_from_update(update)
+    text = update.message.text or ""
+    lines = text.splitlines()[1:]
+    lines = [line.strip() for line in lines if line.strip()]
+
+    if not lines:
+        if default_tipe == "keluar":
+            contoh = "`/bulk_out\n12000 makan seblak\n5000 jajan cilok\n3000 transport parkir`"
+        elif default_tipe == "masuk":
+            contoh = "`/bulk_in\n50000 jualan mie\n10000 cashback spay`"
+        else:
+            contoh = "`/bulk\n- 12000 makan seblak\n- 5000 jajan cilok\n+ 50000 jualan mie`"
+        await update.message.reply_text(
+            "Bisa input banyak sekaligus. Tulis tiap transaksi di baris baru ya.\n\n"
+            f"Contoh:\n{contoh}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    success_rows = []
+    failed = []
+    for idx, line in enumerate(lines, 1):
+        try:
+            tipe, nominal, kategori, catatan, created_at, payment_method = _parse_bulk_line(line, default_tipe)
+            if not db.category_exists(user_id, tipe, kategori):
+                db.add_category(user_id, tipe, kategori)
+            tid = db.add_transaction(user_id, tipe, nominal, kategori, catatan, created_at, payment_method)
+            row = db.get_transaction(user_id, tid)
+            if row:
+                success_rows.append(row)
+        except ValueError as exc:
+            failed.append((idx, line, str(exc)))
+
+    total_in = sum(int(r["nominal"]) for r in success_rows if r["tipe"] == "masuk")
+    total_out = sum(int(r["nominal"]) for r in success_rows if r["tipe"] == "keluar")
+    text_lines = [
+        "✅ *Bulk input selesai!*",
+        f"Berhasil: *{len(success_rows)} transaksi*",
+        f"➕ Masuk: *{rupiah(total_in)}*",
+        f"➖ Keluar: *{rupiah(total_out)}*",
+    ]
+    if success_rows:
+        text_lines.append("\n🧾 *ID transaksi baru:*")
+        for r in success_rows[:12]:
+            sign = "➕" if r["tipe"] == "masuk" else "➖"
+            text_lines.append(f"{sign} ID #{transaction_display_id(r)} • `{r['kategori']}` • *{rupiah(r['nominal'])}*")
+        if len(success_rows) > 12:
+            text_lines.append(f"...dan {len(success_rows) - 12} transaksi lainnya.")
+    if failed:
+        text_lines.append("\n⚠️ *Gagal dibaca:*")
+        for idx, line, err in failed[:8]:
+            text_lines.append(f"Baris {idx}: `{line}` → {err}")
+        if len(failed) > 8:
+            text_lines.append(f"...dan {len(failed) - 8} baris gagal lainnya.")
+    text_lines.append("\nCek ringkasan: `/today`")
+    await update.message.reply_text("\n".join(text_lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def bulk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await bulk_transaksi(update, context, None)
+
+
+async def bulk_out(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await bulk_transaksi(update, context, "keluar")
+
+
+async def bulk_in(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await bulk_transaksi(update, context, "masuk")
 
 
 async def kategori_tambah(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -222,7 +331,7 @@ async def hapus_terakhir(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Belum ada transaksi yang bisa dihapus.")
         return
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Ya, hapus", callback_data=f"delete_yes:{last['id']}"), InlineKeyboardButton("Batal", callback_data="delete_no")]
+        [InlineKeyboardButton("Ya, hapus", callback_data=f"delete_yes:{transaction_display_id(last)}"), InlineKeyboardButton("Batal", callback_data="delete_no")]
     ])
     await update.message.reply_text("Yakin mau hapus transaksi terakhir ini?\n\n" + format_transaction(last), reply_markup=keyboard)
 
@@ -248,7 +357,7 @@ async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         await query.message.reply_text(
             "✏️ Copy format ini lalu ubah angkanya:\n"
-            f"`/edit {row['id']} {row['nominal']} {row['kategori']} {row['catatan'] or ''}`",
+            f"`/edit {transaction_display_id(row)} {row['nominal']} {row['kategori']} {row['catatan'] or ''} @{row['payment_method']}`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -260,8 +369,8 @@ async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def edit_terakhir(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = ensure_user_from_update(update)
     try:
-        nominal, kategori, catatan = parse_transaction_args(context.args)
-        row = db.update_last_transaction(user_id, nominal, kategori, catatan)
+        nominal, kategori, catatan, created_at, payment_method = parse_transaction_args_with_date(context.args)
+        row = db.update_last_transaction(user_id, nominal, kategori, catatan, created_at, payment_method)
         if not row:
             await update.message.reply_text("Belum ada transaksi yang bisa diedit.")
             return
@@ -292,13 +401,13 @@ async def edit_transaksi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     try:
         transaction_id = int(context.args[0])
-        nominal, kategori, catatan = parse_transaction_args(context.args[1:])
+        nominal, kategori, catatan, created_at, payment_method = parse_transaction_args_with_date(context.args[1:])
         if not db.category_exists(user_id, "masuk", kategori) and not db.category_exists(user_id, "keluar", kategori):
             # Kita tidak tahu tipe transaksi dari argumen, jadi nanti pakai tipe lama dari row.
             old = db.get_transaction(user_id, transaction_id)
             if old:
                 db.add_category(user_id, old["tipe"], kategori)
-        row = db.update_transaction(user_id, transaction_id, nominal, kategori, catatan)
+        row = db.update_transaction(user_id, transaction_id, nominal, kategori, catatan, created_at, payment_method)
         if not row:
             await update.message.reply_text("Transaksi dengan ID itu nggak ketemu.")
             return
@@ -321,6 +430,112 @@ async def hapus_transaksi(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         [InlineKeyboardButton("Ya, hapus", callback_data=f"delete_yes:{transaction_id}"), InlineKeyboardButton("Batal", callback_data="delete_no")]
     ])
     await update.message.reply_text("Yakin mau hapus transaksi ini?\n\n" + format_transaction(row), parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+
+
+async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = ensure_user_from_update(update)
+    last = db.get_last_transaction(user_id)
+    if not last:
+        await update.message.reply_text("Belum ada transaksi buat di-undo.")
+        return
+    tid = transaction_display_id(last)
+    db.delete_transaction(user_id, tid)
+    await update.message.reply_text(f"↩️ Undo berhasil. Transaksi ID #{tid} dihapus. ID transaksi dirapikan lagi ya.")
+
+
+async def rename_cat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = ensure_user_from_update(update)
+    raw = " ".join(context.args).strip()
+    if not raw:
+        await update.message.reply_text("Format: `/rename_cat kategori lama | kategori baru`\nContoh: `/rename_cat lzd | marketplace`", parse_mode=ParseMode.MARKDOWN)
+        return
+    if "|" in raw:
+        old, new = [x.strip() for x in raw.split("|", 1)]
+    elif len(context.args) >= 2:
+        old, new = context.args[0], " ".join(context.args[1:])
+    else:
+        await update.message.reply_text("Format: `/rename_cat lzd | marketplace`", parse_mode=ParseMode.MARKDOWN)
+        return
+    try:
+        count = db.rename_category(user_id, old, new)
+        await update.message.reply_text(f"✅ Kategori `{old.lower()}` diganti jadi `{new.lower()}`. Transaksi terdampak: {count}.", parse_mode=ParseMode.MARKDOWN)
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+
+
+async def search_transaksi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = ensure_user_from_update(update)
+    keyword = " ".join(context.args).strip()
+    if not keyword:
+        await update.message.reply_text("Format: `/search seblak` atau `/search lzd`", parse_mode=ParseMode.MARKDOWN)
+        return
+    rows = db.search_transactions(user_id, keyword, 20)
+    if not rows:
+        await update.message.reply_text(f"Nggak nemu transaksi yang mengandung `{keyword}`.", parse_mode=ParseMode.MARKDOWN)
+        return
+    lines = [f"🔎 *Search:* `{keyword}`", ""]
+    lines += [format_transaction(r) for r in rows[:10]]
+    if len(rows) > 10:
+        lines.append(f"\n...dan {len(rows)-10} hasil lain.")
+    await update.message.reply_text("\n\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def category_filter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = ensure_user_from_update(update)
+    kategori = " ".join(context.args).strip()
+    if not kategori:
+        await update.message.reply_text("Format: `/cat marketplace` atau `/cat makan`", parse_mode=ParseMode.MARKDOWN)
+        return
+    rows = db.filter_transactions_by_category(user_id, kategori, 20)
+    if not rows:
+        await update.message.reply_text(f"Belum ada transaksi di kategori `{kategori.lower()}`.", parse_mode=ParseMode.MARKDOWN)
+        return
+    total_in = sum(int(r["nominal"]) for r in rows if r["tipe"] == "masuk")
+    total_out = sum(int(r["nominal"]) for r in rows if r["tipe"] == "keluar")
+    lines = [f"🏷️ *Kategori:* `{kategori.lower()}`", f"Masuk: *{rupiah(total_in)}* • Keluar: *{rupiah(total_out)}*", ""]
+    lines += [format_transaction(r) for r in rows[:10]]
+    if len(rows) > 10:
+        lines.append(f"\n...dan {len(rows)-10} transaksi lain.")
+    await update.message.reply_text("\n\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def backup_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Versi ringan: reminder manual via chat, bukan scheduler mingguan kompleks.
+    if not context.args or context.args[0].lower() not in {"on", "off"}:
+        await update.message.reply_text("Untuk sekarang backup manual ya: ketik `/export_csv` sebelum update bot.\nCommand ini jadi pengingat aja: `/backup_reminder on`", parse_mode=ParseMode.MARKDOWN)
+        return
+    if context.args[0].lower() == "on":
+        await update.message.reply_text("✅ Noted. Sebelum update/redeploy bot, jangan lupa `/export_csv` dulu ya 💾")
+    else:
+        await update.message.reply_text("Oke, reminder backup manual dimatikan dari chat ini.")
+
+
+async def edit_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = ensure_user_from_update(update)
+    if len(context.args) < 2 or not context.args[0].isdigit():
+        await update.message.reply_text("Format: `/pay ID metode`\nContoh: `/pay 13 qris`", parse_mode=ParseMode.MARKDOWN)
+        return
+    transaction_id = int(context.args[0])
+    row = db.get_transaction(user_id, transaction_id)
+    if not row:
+        await update.message.reply_text("Transaksi dengan ID itu nggak ketemu.")
+        return
+    method = normalize_payment_method(" ".join(context.args[1:]))
+    updated = db.update_transaction(user_id, transaction_id, int(row["nominal"]), row["kategori"], row["catatan"] or "", None, method)
+    await update.message.reply_text("✅ Metode pembayaran diupdate:\n\n" + format_transaction(updated), parse_mode=ParseMode.MARKDOWN)
+
+
+async def filter_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = ensure_user_from_update(update)
+    if not context.args:
+        await update.message.reply_text("Format: `/method qris` atau `/method shopeepay`", parse_mode=ParseMode.MARKDOWN)
+        return
+    method = normalize_payment_method(" ".join(context.args))
+    rows = db.filter_transactions_by_payment_method(user_id, method, 30)
+    if not rows:
+        await update.message.reply_text(f"Belum ada transaksi metode `{method}`.", parse_mode=ParseMode.MARKDOWN)
+        return
+    await update.message.reply_text(f"💳 *Transaksi metode `{method}`:*\n\n" + "\n".join(format_transaction(r) for r in rows), parse_mode=ParseMode.MARKDOWN)
 
 
 async def export_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -510,14 +725,26 @@ async def interactive_nominal(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def interactive_note(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["input_catatan"] = "" if update.message.text.strip() == "-" else update.message.text.strip()
+    keyboard = ReplyKeyboardMarkup(
+        [["cash", "qris"], ["shopeepay", "dana"], ["gopay", "bank"], ["lainnya"]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+    await update.message.reply_text("Metode pembayarannya apa? Pilih tombol atau ketik sendiri. Contoh: qris / shopeepay / dana / cash", reply_markup=keyboard)
+    return ASK_PAYMENT
+
+
+async def interactive_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = ensure_user_from_update(update)
     tipe = context.user_data["input_tipe"]
     kategori = context.user_data["input_kategori"]
     nominal = context.user_data["input_nominal"]
-    catatan = "" if update.message.text.strip() == "-" else update.message.text.strip()
+    catatan = context.user_data.get("input_catatan", "")
+    payment_method = normalize_payment_method(update.message.text.strip())
     if not db.category_exists(user_id, tipe, kategori):
         db.add_category(user_id, tipe, kategori)
-    transaction_id = db.add_transaction(user_id, tipe, nominal, kategori, catatan)
+    transaction_id = db.add_transaction(user_id, tipe, nominal, kategori, catatan, None, payment_method)
     row = db.get_transaction(user_id, transaction_id)
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ Cara edit", callback_data=f"edit_hint:{transaction_id}"), InlineKeyboardButton("🗑️ Hapus", callback_data=f"delete_yes:{transaction_id}")],
@@ -756,6 +983,7 @@ def get_handlers():
             ASK_KATEGORI: [MessageHandler(filters.TEXT & ~filters.COMMAND, interactive_category)],
             ASK_NOMINAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, interactive_nominal)],
             ASK_CATATAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, interactive_note)],
+            ASK_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, interactive_payment)],
         },
         fallbacks=[CommandHandler("start", start)],
     )
@@ -774,6 +1002,9 @@ def get_handlers():
         CommandHandler("help", help_command),
         CommandHandler(["keluar", "k", "out", "expense"], keluar),
         CommandHandler(["masuk", "m", "in", "income"], masuk),
+        CommandHandler(["bulk", "batch"], bulk),
+        CommandHandler(["bulk_out", "batch_out"], bulk_out),
+        CommandHandler(["bulk_in", "batch_in"], bulk_in),
         CommandHandler(["kategori_tambah", "ktb", "add_category"], kategori_tambah),
         CommandHandler(["kategori", "kt", "category", "categories"], kategori),
         CommandHandler(["hariini", "h", "today"], hariini),
@@ -786,6 +1017,13 @@ def get_handlers():
         CommandHandler(["reminder", "rm"], reminder),
         CommandHandler(["reminder_off", "rmo"], reminder_off),
         CommandHandler(["hapus_terakhir", "ht"], hapus_terakhir),
+        CommandHandler(["undo"], undo),
+        CommandHandler(["rename_cat", "merge_cat"], rename_cat),
+        CommandHandler(["search", "find"], search_transaksi),
+        CommandHandler(["cat", "category_filter"], category_filter),
+        CommandHandler(["pay", "payment"], edit_payment_method),
+        CommandHandler(["method", "payment_method"], filter_payment_method),
+        CommandHandler(["backup_reminder"], backup_reminder),
         CommandHandler(["edit_terakhir", "et"], edit_terakhir),
         CommandHandler(["detail", "d", "view"], detail_transaksi),
         CommandHandler(["edit", "e"], edit_transaksi),
